@@ -27,15 +27,33 @@ class SelectBracket(bh_plugin.BracketPluginCommand):
         first, last = self.left.end, self.right.begin
 
         if select == 'left':
-            first, last = self.select_left(name, first, last, alternate)
+            first, last = self.select_left(name, alternate)
         elif select == 'right':
-            first, last = self.select_right(name, first, last, alternate)
+            first, last = self.select_right(name, alternate)
+        elif select == 'other':
+            # If empty contents, don't move.
+            if not last - first:
+                return
+            if self.right.begin <= self.current_right <= self.right.end:
+                first, last = self.select_left(name, alternate)
+            elif self.left.begin <= self.current_left <= self.left.end:
+                first, last = self.select_right(name, alternate)
+            else:
+                # If not at a bracket, rather inside, go to nearest bracket.
+                dist_to_right = self.right.begin - self.current_left
+                dist_to_left = self.current_left - self.left.end
+                if dist_to_right < dist_to_left:
+                    first, last = self.select_right(name, alternate)
+                else:
+                    first, last = self.select_left(name, alternate)
         elif first == self.current_left and last == self.current_right or always_include_brackets:
-            first, last = self.select_expand(first, last)
+            # Expand content selection.
+            first, last = self.left.begin, self.right.end
+            self.refresh_match = True
 
         self.selection = [sublime.Region(first, last)]
 
-    def select_left(self, name, first, last, alternate):
+    def select_left(self, name, alternate):
         """Select the left bracket."""
 
         if name in self.tags and self.left.size() > 1:
@@ -56,7 +74,7 @@ class SelectBracket(bh_plugin.BracketPluginCommand):
                     first, last = self.left.begin, self.left.begin
         return first, last
 
-    def select_right(self, name, first, last, alternate):
+    def select_right(self, name, alternate):
         """Select the right bracket."""
 
         if self.left.end != self.right.end:
@@ -92,15 +110,8 @@ class SelectBracket(bh_plugin.BracketPluginCommand):
                         first, last = self.right.end, self.right.end
         return first, last
 
-    def select_expand(self, first, last):
-        """Expand content selection."""
-
-        first, last = self.left.begin, self.right.end
-        self.refresh_match = True
-        return first, last
-
 
 def plugin():
-    """Make plugin available."""
+    """Provide plugin."""
 
     return SelectBracket
