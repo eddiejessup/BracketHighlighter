@@ -10,6 +10,8 @@ from .bh_logging import debug, log
 from operator import itemgetter
 import sublime
 import sublime_plugin
+import json
+from collections import OrderedDict
 
 BH_STYLE = "default"
 BH_ENABLED = True
@@ -415,7 +417,6 @@ class BhDebugRuleCommand(sublime_plugin.WindowCommand):
     def show_merged(self, rule):
         """Show merged rule."""
 
-        import json
         self.text.append("        {\n")
         rule_count = 0
         rule_length = len(rule) - 1
@@ -428,7 +429,6 @@ class BhDebugRuleCommand(sublime_plugin.WindowCommand):
     def show_key(self, rule):
         """Show the key."""
 
-        import json
         if self.key in rule:
             self.text.append(
                 '        {"name": "%s", "%s": %s}' % (
@@ -439,7 +439,6 @@ class BhDebugRuleCommand(sublime_plugin.WindowCommand):
     def show_rules(self, brackets, scopes):
         """Show the rules."""
 
-        from collections import OrderedDict
         self.text = ["[\n"]
         rules_count = 0
         for rules in [process_overrides(brackets), process_overrides(scopes)]:

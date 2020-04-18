@@ -18,9 +18,6 @@ from . import bh_rules
 from . import bh_popup
 from .bh_logging import debug, log
 
-if 'bh_thread' not in globals():
-    bh_thread = None
-
 bh_match = None
 
 BH_MATCH_TYPE_NONE = 0
@@ -437,15 +434,6 @@ class BhCore(object):
         # Free up BH
         self.search = None
         self.view = None
-
-        # Setup thread to do another match to refresh the match
-        if self.refresh_match:
-            start_task()
-            bh_thread.type = BH_MATCH_TYPE_SELECTION
-            bh_thread.modified = True
-            bh_thread.time = time()
-
-        view.settings().set("bracket_highlighter.busy", False)
 
     def sub_search(self, sel, scope=None):
         """Search a scope bracket match for brackets within."""
@@ -874,8 +862,6 @@ class BhKeyCommand(sublime_plugin.TextCommand):
             plugin = {}
 
         # Override events
-        bh_thread.ignore_all = True
-        bh_thread.modified = False
         self.bh = BhCore(
             threshold,
             lines,
@@ -893,8 +879,6 @@ class BhKeyCommand(sublime_plugin.TextCommand):
 
         debug("Key Event")
         self.bh.match(self.view)
-        bh_thread.ignore_all = False
-        bh_thread.time = time()
 
     def is_enabled(self, **kwargs):
         """Check if command is enabled."""
@@ -915,15 +899,13 @@ class BhAsyncKeyCommand(BhKeyCommand):
     def execute(self):
         """Call execute command asynchronously."""
 
-        sublime.set_timeout(self.async_execute, 100)
+        sublime.set_timeout_async(self.async_execute, 100)
 
     def async_execute(self):
         """Trigger actual BH command."""
 
         debug("Async Key Event")
         self.bh.match(self.view)
-        bh_thread.ignore_all = False
-        bh_thread.time = time()
 
 
 ####################
@@ -965,9 +947,6 @@ class BhDebugCommand(sublime_plugin.ApplicationCommand):
 class BhListenerCommand(sublime_plugin.EventListener):
     """
     Manage when to kick off bracket matching.
-
-    Try and reduce redundant requests by letting the
-    background thread ensure certain needed match occurs
     """
 
     def on_hover(self, view, point, hover_zone):
@@ -1013,25 +992,14 @@ class BhListenerCommand(sublime_plugin.EventListener):
             elif region is not None:
                 bh_popup.BhOffscreenPopup().show_popup(view, point, region, icon)
 
-    def on_load(self, view):
+    def on_load_async(self, view):
         """Search brackets on view load."""
+        self.on_selection_modified_async(view)
 
-        if self.ignore_event(view):
-            return
-        bh_thread.type = BH_MATCH_TYPE_SELECTION
-        bh_thread.view = view
-        sublime.set_timeout(bh_thread.payload, 0)
-
-    def on_modified(self, view):
+    def on_modified_async(self, view):
         """Update highlighted brackets when the text changes."""
-
-        if self.ignore_event(view):
-            return
-        start_task()
-        bh_thread.type = BH_MATCH_TYPE_EDIT
-        bh_thread.modified = True
-        bh_thread.view = view
-        bh_thread.time = time()
+        if not self.ignore_event(view):
+            start_task(view, type_=BH_MATCH_TYPE_EDIT)
 
     def clear_disabled(self, view):
         """Clear disabled regions."""
@@ -1050,45 +1018,28 @@ class BhListenerCommand(sublime_plugin.EventListener):
                 for region_key in view.settings().get("bracket_highlighter.regions", []):
                     view.erase_regions(region_key)
 
-    def on_activated(self, view):
+    def on_activated_async(self, view):
         """Highlight brackets when the view gains focus again."""
 
-        if bh_thread is not None:
-            self.clear_disabled(view)
+        self.clear_disabled(view)
 
-        if self.ignore_event(view):
-            return
-        bh_thread.type = BH_MATCH_TYPE_SELECTION
-        bh_thread.view = view
-        sublime.set_timeout(bh_thread.payload, 0)
+        self.on_load_async(view)
 
-    def on_selection_modified(self, view):
+    def on_selection_modified_async(self, view):
         """Highlight brackets when the selections change."""
-
-        if self.ignore_event(view):
-            return
-        if bh_thread.type != BH_MATCH_TYPE_EDIT:
-            bh_thread.type = BH_MATCH_TYPE_SELECTION
-        now = time()
-        bh_thread.view = view
-        if now - bh_thread.time > bh_thread.wait_time:
-            sublime.set_timeout(bh_thread.payload, 0)
-        else:
-            start_task()
-            bh_thread.modified = True
-            bh_thread.time = now
+        if not self.ignore_event(view):
+            start_task(view, type_=BH_MATCH_TYPE_SELECTION)
 
     def ignore_event(self, view):
         """
         Ignore highlight request.
 
         Ignore request to highlight if the view is a widget,
-        or if it is too soon to accept an event.
+`        or if it is too soon to accept an event.
         """
 
         settings = view.settings()
         return (
-            bh_thread is None or bh_thread.ignore_all or
             settings.get('bracket_highlighter.ignore', False) or
             (
                 settings.get('is_widget') and
@@ -1097,79 +1048,28 @@ class BhListenerCommand(sublime_plugin.EventListener):
         )
 
 
-class BhThread(threading.Thread):
-    """BH threading."""
+state = {
+    'busy': False,
+    'last_sequence_id': 0,
+}
 
-    def __init__(self):
-        """Setup the thread."""
+WAIT_TIME = 25  # milliseconds
 
-        self.reset()
-        self.queue = Queue()
-        self.view = None
-        threading.Thread.__init__(self)
 
-    def reset(self):
-        """Reset the thread variables."""
+def start_task(view, type_):
+    seq_id = state['last_sequence_id'] + 1
+    state['last_sequence_id'] += 1
+    def callback():
+        if seq_id == state['last_sequence_id'] and not state['busy']:
+            state['busy'] = True
+            bh_match(view, type_ == BH_MATCH_TYPE_EDIT)
+            state['busy'] = False
 
-        self.wait_time = 0.12
-        self.time = time()
-        self.queue = Queue()
-        self.modified = False
-        self.type = BH_MATCH_TYPE_SELECTION
-        self.ignore_all = False
-        self.abort = False
-
-    def payload(self):
-        """Code to run."""
-
-        self.modified = False
-        self.ignore_all = True
-        if bh_match is not None and self.view is not None:
-            bh_match(self.view, self.type == BH_MATCH_TYPE_EDIT)
-        self.view = None
-        self.ignore_all = False
-        self.time = time()
-
-    def kill(self):
-        """Kill thread."""
-
-        self.abort = True
-        self.queue.put(True)
-        while self.is_alive():
-            pass
-        self.reset()
-
-    def run(self):
-        """Thread loop."""
-
-        task = False
-        while not self.abort:
-            task = self.queue.get()
-            while task and not self.abort:
-                if self.modified is True and time() - self.time > self.wait_time:
-                    sublime.set_timeout(self.payload, 0)
-                    task = False
-                sleep(0.5)
-
+    sublime.set_timeout_async(callback, WAIT_TIME)
 
 ####################
 # Loading
 ####################
-
-def start_task():
-    """Start task."""
-
-    if bh_thread.is_alive():
-        bh_thread.queue.put(True)
-
-
-def init_bh_match():
-    """Initialize the match object."""
-
-    global bh_match
-    bh_match = BhCore().match
-    debug("Match object loaded.")
-
 
 def plugin_loaded():
     """
@@ -1179,23 +1079,15 @@ def plugin_loaded():
     and start event loop.  Restart event loop if already loaded.
     """
 
-    global HIGH_VISIBILITY
-    global bh_thread
-
-    init_bh_match()
+    global bh_match
+    bh_match = BhCore().match
+    debug("Match object loaded.")
 
     global HIGH_VISIBILITY
     if sublime.load_settings("bh_core.sublime-settings").get('high_visibility_enabled_by_default', False):
         HIGH_VISIBILITY = True
 
-    if bh_thread is not None:
-        bh_thread.kill()
-    bh_thread = BhThread()
-    bh_thread.start()
-
-
 def plugin_unloaded():
     """Tear down plugin."""
 
-    bh_thread.kill()
     bh_regions.clear_all_regions()
